@@ -19,4 +19,6 @@ SQL Driver for the AWS RDS Data API
 - [ ] Remove fmt dependency, rather use custom errors
 - [ ] Double check if our atomic close check works as expected
 - [ ] Write error path test cases
-- [ ] @TODO implement the driver.ColumnType methods on "Rows"
+- [ ] implement the driver.ColumnType methods on "Rows"
+- [ ] add a cloudformation for setting up a testig mysql database
+- [ ] test mysql last inserted id function
