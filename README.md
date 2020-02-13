@@ -12,6 +12,8 @@ SQL Driver for the AWS RDS Data API
 
 ## TODO
 - [x] Get basic db.Exec and db.Query working
+- [x] add a cloudformation for setting up a testig mysql database
+- [x] test mysql last inserted id function
 - [ ] Can we pass this test: `https://github.com/bradfitz/go-sql-test`
 - [ ] Can we include the AWS library in such a way that we don't have to publish new versions for every new release
 - [ ] The package and module name are a bit verbose, maybe shortend to `rdsda`?
@@ -20,5 +22,3 @@ SQL Driver for the AWS RDS Data API
 - [ ] Double check if our atomic close check works as expected
 - [ ] Write error path test cases
 - [ ] implement the driver.ColumnType methods on "Rows"
-- [ ] add a cloudformation for setting up a testig mysql database
-- [ ] test mysql last inserted id function

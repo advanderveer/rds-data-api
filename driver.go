@@ -300,8 +300,16 @@ type Result struct{ output *rdsds.ExecuteStatementOutput }
 // after, for example, an INSERT into a table with primary
 // key.
 func (r *Result) LastInsertId() (id int64, err error) {
-	// @TODO implement: postgres doesn't suppor this, mysql does
-	return
+	if len(r.output.GeneratedFields) != 1 {
+		return -1, fmt.Errorf("LastInsertId not supported by postgres engine AND demands the exec to return exactly one generated field, got: %d", len(r.output.GeneratedFields))
+	}
+
+	f := r.output.GeneratedFields[0]
+	if f.LongValue == nil {
+		return -1, fmt.Errorf("generated field is not a non-nil long value")
+	}
+
+	return aws.Int64Value(f.LongValue), nil
 }
 
 // RowsAffected returns the number of rows affected by the

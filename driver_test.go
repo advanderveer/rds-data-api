@@ -24,7 +24,7 @@ func TestDriverQuery(t *testing.T) {
 	limit := 10
 
 	cfg := envCfgOrSkip(t)
-	cfg.Add("Database", "postgres")
+	cfg.Add("Database", "mysql")
 
 	db, err := sql.Open("rds-data-api", cfg.Encode())
 	if err != nil {
@@ -71,19 +71,24 @@ func TestDriverQuery(t *testing.T) {
 
 func TestDriverExec(t *testing.T) {
 	cfg := envCfgOrSkip(t)
-	cfg.Add("Database", "postgres")
+	cfg.Add("Database", "mysql")
 
 	db, err := sql.Open("rds-data-api", cfg.Encode())
 	if err != nil {
 		t.Fatalf("failed to open db: %v", err)
 	}
 
-	res, err := db.Exec("CREATE TABLE IF NOT EXISTS foo (id serial PRIMARY KEY);")
+	res, err := db.Exec("CREATE DATABASE IF NOT EXISTS bar;")
 	if err != nil {
 		t.Fatalf("failed to create table: %v", err)
 	}
 
-	res, err = db.Exec("INSERT INTO foo DEFAULT VALUES;")
+	res, err = db.Exec("CREATE TABLE IF NOT EXISTS bar.foo (id serial PRIMARY KEY);")
+	if err != nil {
+		t.Fatalf("failed to create table: %v", err)
+	}
+
+	res, err = db.Exec("INSERT INTO bar.foo VALUES ();")
 	if err != nil {
 		t.Fatalf("failed to insert into table: %v", err)
 	}
@@ -102,14 +107,11 @@ func TestDriverExec(t *testing.T) {
 		t.Fatalf("failed to create last insert id: %v", err)
 	}
 
-	_ = id //@TODO test with a mysql database, posgres doesn't support that
-	// if id != 1 {
-	// 	t.Fatalf("expected this to be the id, got: %v", id)
-	// }
+	if id != 1 {
+		t.Fatalf("expected lastInsertID to succeed with this id, got: %v", id)
+	}
 
-	// _ = res //@TODO test affected rows
-
-	res, err = db.Exec("DROP TABLE IF EXISTS foo;")
+	res, err = db.Exec("DROP TABLE IF EXISTS bar.foo;")
 	if err != nil {
 		t.Fatalf("failed to drop table: %v", err)
 	}
@@ -119,7 +121,7 @@ func TestDriverExec(t *testing.T) {
 		t.Fatalf("failed to get affected rows: %v", err)
 	}
 
-	// NOTE: this seems to be a bug with AWS, do more research. It should be 1
+	// NOTE: is this a with AWS, do more research if it should be 1
 	if aff != 0 {
 		t.Fatalf("expected these nr of rows to be affected, got: %d", aff)
 	}
