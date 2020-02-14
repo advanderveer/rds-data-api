@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"net/url"
 	"os"
+	"reflect"
 	"testing"
 
 	_ "github.com/advanderveer/rds-data-api"
@@ -31,11 +32,13 @@ func TestDriverQuery(t *testing.T) {
 		t.Fatalf("failed to open db: %v", err)
 	}
 
+	// query database outside of transaction
 	rows, err := db.Query("select table_catalog, table_schema, table_name from information_schema.tables limit :n", sql.Named("n", limit))
 	if err != nil {
 		t.Fatalf("failed to query: %v", err)
 	}
 
+	// assert column data
 	cols, err := rows.Columns()
 	if err != nil {
 		t.Fatalf("failed to ask for columns: %v", err)
@@ -45,6 +48,7 @@ func TestDriverQuery(t *testing.T) {
 		t.Fatalf("expected this nr of columns, got: %v", len(cols))
 	}
 
+	// assert rows
 	var n int
 	for rows.Next() {
 		var (
@@ -78,21 +82,25 @@ func TestDriverExec(t *testing.T) {
 		t.Fatalf("failed to open db: %v", err)
 	}
 
+	// create a database
 	res, err := db.Exec("CREATE DATABASE IF NOT EXISTS bar;")
 	if err != nil {
 		t.Fatalf("failed to create table: %v", err)
 	}
 
+	// add a table
 	res, err = db.Exec("CREATE TABLE IF NOT EXISTS bar.foo (id serial PRIMARY KEY);")
 	if err != nil {
 		t.Fatalf("failed to create table: %v", err)
 	}
 
+	// insert values into the table
 	res, err = db.Exec("INSERT INTO bar.foo VALUES ();")
 	if err != nil {
 		t.Fatalf("failed to insert into table: %v", err)
 	}
 
+	// assert the affected rows
 	aff, err := res.RowsAffected()
 	if err != nil {
 		t.Fatalf("failed to get affected rows: %v", err)
@@ -102,6 +110,7 @@ func TestDriverExec(t *testing.T) {
 		t.Fatalf("expected these nr of rows to be affected, got: %d", aff)
 	}
 
+	// assert the last inserted id
 	id, err := res.LastInsertId()
 	if err != nil {
 		t.Fatalf("failed to create last insert id: %v", err)
@@ -111,6 +120,7 @@ func TestDriverExec(t *testing.T) {
 		t.Fatalf("expected lastInsertID to succeed with this id, got: %v", id)
 	}
 
+	// assert table drop
 	res, err = db.Exec("DROP TABLE IF EXISTS bar.foo;")
 	if err != nil {
 		t.Fatalf("failed to drop table: %v", err)
@@ -136,7 +146,7 @@ func TestDriverTxIsolationAndCommit(t *testing.T) {
 		t.Fatalf("failed to open db: %v", err)
 	}
 
-	// tx1
+	// start and fill up transaction
 	tx, err := db.Begin()
 	if err != nil {
 		t.Fatalf("failed to start tx: %v", err)
@@ -157,6 +167,7 @@ func TestDriverTxIsolationAndCommit(t *testing.T) {
 		t.Fatalf("failed to insert with tx: %v", err)
 	}
 
+	// assert before commit
 	rows, err := db.Query("SELECT * FROM bar.foo LIMIT 1")
 	if err != nil {
 		t.Fatalf("failed to query: %v", err)
@@ -171,11 +182,13 @@ func TestDriverTxIsolationAndCommit(t *testing.T) {
 		t.Fatalf("should have this amount of rows before commit, got: %d", n)
 	}
 
+	// perform the actual commit
 	err = tx.Commit()
 	if err != nil {
 		t.Fatalf("failed to commit transaction: %v", err)
 	}
 
+	// assert after the commit
 	rows, err = db.Query("SELECT * FROM bar.foo LIMIT 1")
 	if err != nil {
 		t.Fatalf("failed to query: %v", err)
@@ -196,7 +209,6 @@ func TestDriverTxIsolationAndCommit(t *testing.T) {
 }
 
 func TestDriverTxRollback(t *testing.T) {
-
 	cfg := envCfgOrSkip(t)
 	cfg.Add("Database", "mysql")
 
@@ -245,6 +257,79 @@ func TestDriverTxRollback(t *testing.T) {
 
 	if n != 0 {
 		t.Fatalf("should have this amount of rows after rollback, got: %d", n)
+	}
+
+	// clean up
+	_, err = db.Exec("DROP TABLE IF EXISTS bar.foo;")
+	if err != nil {
+		t.Fatalf("failed to drop table: %v", err)
+	}
+}
+
+func TestDriverPrepare(t *testing.T) {
+	cfg := envCfgOrSkip(t)
+	cfg.Add("Database", "mysql")
+
+	db, err := sql.Open("rds-data-api", cfg.Encode())
+	if err != nil {
+		t.Fatalf("failed to open db: %v", err)
+	}
+
+	// setup database
+	_, err = db.Exec("CREATE DATABASE IF NOT EXISTS bar;")
+	if err != nil {
+		t.Fatalf("failed to create table: %v", err)
+	}
+
+	_, err = db.Exec("CREATE TABLE IF NOT EXISTS bar.foo (id serial PRIMARY KEY, name VARCHAR(255));")
+	if err != nil {
+		t.Fatalf("failed to create table: %v", err)
+	}
+
+	// begin prepared statement tx
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("failed to begin tx: %v", err)
+	}
+
+	s, err := tx.Prepare("INSERT INTO bar.foo VALUES (DEFAULT, :name)")
+	if err != nil {
+		t.Fatalf("failed to prepare statement: %v", err)
+	}
+
+	var res []sql.Result
+	for _, n := range []string{"bar", "foo", "foobar"} {
+		r, err := s.Exec(sql.Named("name", n))
+		if err != nil {
+			t.Fatalf("failed to exec prepared statement: %v", err)
+		}
+
+		// @TODO assert error for using res before closing
+		res = append(res, r)
+	}
+
+	err = s.Close()
+	if err != nil {
+		t.Fatalf("failed to close statement: %v", err)
+	}
+
+	var ids []int64
+	for _, r := range res {
+		id, err := r.LastInsertId()
+		if err != nil {
+			t.Fatalf("failed to get last ID: %v", err)
+		}
+
+		ids = append(ids, id)
+	}
+
+	if !reflect.DeepEqual(ids, []int64{1, 2, 3}) {
+		t.Fatalf("unexpected set of ids, got: %v", ids)
+	}
+
+	err = tx.Commit()
+	if err != nil {
+		t.Fatalf("failed to commit: %v", err)
 	}
 
 	// clean up

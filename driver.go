@@ -61,7 +61,11 @@ func Open(q string) (_ driver.Conn, err error) {
 // context is for the preparation of the statement,
 // it must not store the context within the statement itself.
 func (c *Conn) PrepareContext(ctx context.Context, query string) (_ driver.Stmt, err error) {
-	panic("not implemented")
+	if c.rdsDataService == nil {
+		return nil, fmt.Errorf("connection already closed") //@TODO test
+	}
+
+	return &Stmt{query: query, conn: c}, nil
 }
 
 // BeginTx starts and returns a new transaction.
@@ -167,8 +171,8 @@ func (c *Conn) QueryContext(ctx context.Context, query string, args []driver.Nam
 	return &Rows{output: out}, nil
 }
 
-func (c *Conn) execute(ctx context.Context, query string, args []driver.NamedValue) (out *rdsds.ExecuteStatementOutput, err error) {
-	params := make([]*rdsds.SqlParameter, len(args))
+func toParams(args []driver.NamedValue) (params []*rdsds.SqlParameter, err error) {
+	params = make([]*rdsds.SqlParameter, len(args))
 	for i, arg := range args {
 		if arg.Name == "" {
 			return nil, fmt.Errorf("support named SQL arguments are supported in query")
@@ -194,6 +198,15 @@ func (c *Conn) execute(ctx context.Context, query string, args []driver.NamedVal
 			Name:  aws.String(arg.Name),
 			Value: &f,
 		}
+	}
+
+	return
+}
+
+func (c *Conn) execute(ctx context.Context, query string, args []driver.NamedValue) (out *rdsds.ExecuteStatementOutput, err error) {
+	params, err := toParams(args)
+	if err != nil {
+		return nil, err
 	}
 
 	in := &rdsds.ExecuteStatementInput{
@@ -330,4 +343,100 @@ func decodeField(f *rdsds.Field) (v interface{}, err error) {
 	}
 
 	return
+}
+
+type Stmt struct {
+	query   string
+	conn    *Conn
+	closed  bool
+	sets    [][]*rdsds.SqlParameter
+	updates []*rdsds.UpdateResult
+}
+
+func (s *Stmt) Close() (err error) {
+	if s.closed {
+		return fmt.Errorf("already closed") //@TODO test
+	}
+
+	// @TODO document limitation of this
+	ctx := context.Background()
+
+	in := &rdsds.BatchExecuteStatementInput{
+		Database:      aws.String(s.conn.databaseName),
+		ParameterSets: s.sets,
+		ResourceArn:   aws.String(s.conn.resourceARN),
+		// Schema @TODO allow the user to pass a schema this
+		SecretArn: aws.String(s.conn.secretARN),
+		Sql:       aws.String(s.query),
+	}
+
+	if s.conn.transactionID != "" {
+		in.SetTransactionId(s.conn.transactionID)
+	}
+
+	var out *rdsds.BatchExecuteStatementOutput
+	if out, err = s.conn.rdsDataService.BatchExecuteStatementWithContext(ctx, in); err != nil {
+		return fmt.Errorf("failed to execute batch statement: %w", err) //@TODO test
+	}
+
+	s.updates = out.UpdateResults
+	s.closed = true
+	return nil
+}
+
+func (s *Stmt) NumInput() int {
+	return -1 // AWS Doesn't expose the query parsing so we cannot help the user here.
+}
+
+func (s *Stmt) ExecContext(ctx context.Context, args []driver.NamedValue) (_ driver.Result, err error) {
+	if s.closed {
+		return nil, fmt.Errorf("already closed") //@TODO test
+	}
+
+	params, err := toParams(args)
+	if err != nil {
+		return nil, err
+	}
+
+	s.sets = append(s.sets, params)
+	return &StmtResult{stmt: s, i: len(s.sets) - 1}, nil
+}
+
+func (s *Stmt) QueryContext(ctx context.Context, args []driver.NamedValue) (_ driver.Rows, err error) {
+	if s.closed {
+		return nil, fmt.Errorf("already closed") //@TODO test
+	}
+
+	return nil, fmt.Errorf("this driver cannot return any usefull results for prepared query statements.")
+}
+
+func (s *Stmt) Exec(args []driver.Value) (_ driver.Result, err error) {
+	panic("not implemented, use ExecContext")
+}
+
+func (s *Stmt) Query(args []driver.Value) (_ driver.Rows, err error) {
+	panic("not implemented, use QueryContext")
+}
+
+type StmtResult struct {
+	stmt *Stmt
+	i    int
+}
+
+func (r *StmtResult) LastInsertId() (id int64, err error) {
+	gfields := r.stmt.updates[r.i].GeneratedFields
+	if len(gfields) != 1 {
+		return -1, fmt.Errorf("LastInsertId not supported by postgres engine AND demands the exec to return exactly one generated field, got: %d", len(gfields))
+	}
+
+	f := gfields[0]
+	if f.LongValue == nil {
+		return -1, fmt.Errorf("generated field is not a non-nil long value")
+	}
+
+	return aws.Int64Value(f.LongValue), nil
+}
+
+func (r *StmtResult) RowsAffected() (n int64, err error) {
+	panic("not yet implemented")
 }
