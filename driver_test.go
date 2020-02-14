@@ -126,3 +126,130 @@ func TestDriverExec(t *testing.T) {
 		t.Fatalf("expected these nr of rows to be affected, got: %d", aff)
 	}
 }
+
+func TestDriverTxIsolationAndCommit(t *testing.T) {
+	cfg := envCfgOrSkip(t)
+	cfg.Add("Database", "mysql")
+
+	db, err := sql.Open("rds-data-api", cfg.Encode())
+	if err != nil {
+		t.Fatalf("failed to open db: %v", err)
+	}
+
+	// tx1
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("failed to start tx: %v", err)
+	}
+
+	_, err = tx.Exec("CREATE DATABASE IF NOT EXISTS bar;")
+	if err != nil {
+		t.Fatalf("failed to exec in tx: %v", err)
+	}
+
+	_, err = tx.Exec("CREATE TABLE IF NOT EXISTS bar.foo (id serial PRIMARY KEY);")
+	if err != nil {
+		t.Fatalf("failed to create table: %v", err)
+	}
+
+	_, err = tx.Exec("INSERT INTO bar.foo VALUES ();")
+	if err != nil {
+		t.Fatalf("failed to insert with tx: %v", err)
+	}
+
+	rows, err := db.Query("SELECT * FROM bar.foo LIMIT 1")
+	if err != nil {
+		t.Fatalf("failed to query: %v", err)
+	}
+
+	var n int
+	for rows.Next() {
+		n++
+	}
+
+	if n != 0 {
+		t.Fatalf("should have this amount of rows before commit, got: %d", n)
+	}
+
+	err = tx.Commit()
+	if err != nil {
+		t.Fatalf("failed to commit transaction: %v", err)
+	}
+
+	rows, err = db.Query("SELECT * FROM bar.foo LIMIT 1")
+	if err != nil {
+		t.Fatalf("failed to query: %v", err)
+	}
+
+	for rows.Next() {
+		n++
+	}
+
+	if n != 1 {
+		t.Fatalf("should have this amount of rows after commit, got: %d", n)
+	}
+
+	_, err = db.Exec("DROP TABLE IF EXISTS bar.foo;")
+	if err != nil {
+		t.Fatalf("failed to drop table: %v", err)
+	}
+}
+
+func TestDriverTxRollback(t *testing.T) {
+
+	cfg := envCfgOrSkip(t)
+	cfg.Add("Database", "mysql")
+
+	db, err := sql.Open("rds-data-api", cfg.Encode())
+	if err != nil {
+		t.Fatalf("failed to open db: %v", err)
+	}
+
+	// setup database
+	_, err = db.Exec("CREATE DATABASE IF NOT EXISTS bar;")
+	if err != nil {
+		t.Fatalf("failed to create table: %v", err)
+	}
+
+	_, err = db.Exec("CREATE TABLE IF NOT EXISTS bar.foo (id serial PRIMARY KEY);")
+	if err != nil {
+		t.Fatalf("failed to create table: %v", err)
+	}
+
+	// create a transaction that inserts, but roll back
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("failed to create tx")
+	}
+
+	_, err = tx.Exec("INSERT INTO bar.foo VALUES ();")
+	if err != nil {
+		t.Fatalf("failed to insert with tx: %v", err)
+	}
+
+	err = tx.Rollback()
+	if err != nil {
+		t.Fatalf("failed to rollback: %v", err)
+	}
+
+	// assert no rows were inserted
+	rows, err := db.Query("SELECT * FROM bar.foo LIMIT 1")
+	if err != nil {
+		t.Fatalf("failed to query: %v", err)
+	}
+
+	var n int
+	for rows.Next() {
+		n++
+	}
+
+	if n != 0 {
+		t.Fatalf("should have this amount of rows after rollback, got: %d", n)
+	}
+
+	// clean up
+	_, err = db.Exec("DROP TABLE IF EXISTS bar.foo;")
+	if err != nil {
+		t.Fatalf("failed to drop table: %v", err)
+	}
+}

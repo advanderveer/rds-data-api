@@ -22,20 +22,15 @@ function run_destroy { # destroy the test database and all data in it
 		--stack-name=rdsda-testing
 }
 
-function run_example { # run example program
-	 DATA_API_SECRET_ARN=foo DATA_API_RESOURCE_ARN=bar go run example/main.go 
-}
-
 function run_test { # run tests with coverage report
 	DATA_API_SECRET_ARN=`aws cloudformation describe-stacks --stack-name rdsda-testing --query "Stacks[0].Outputs[?OutputKey=='SecretARN'].OutputValue" --output text` \
 	DATA_API_RESOURCE_ARN=`aws cloudformation describe-stacks --stack-name rdsda-testing --query "Stacks[0].Outputs[?OutputKey=='ResourceARN'].OutputValue" --output text` \
-	go test -v
+	go test -covermode=count -coverprofile=/tmp/cover && go tool cover -html=/tmp/cover 
 }
 
 case $1 in
 	"deploy") run_deploy ;;
 	"destroy") run_destroy ;;
-	"example") run_example ;;
 	"test") run_test ;;
 	*) print_help ;;
 esac

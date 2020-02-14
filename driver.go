@@ -30,6 +30,7 @@ type Conn struct {
 	resourceARN    string                // the aws resource accesses with this conn
 	secretARN      string                // the aws secret that provides access to the resource
 	rdsDataService *rdsds.RDSDataService // AWS RDS data service API
+	transactionID  string                // the id of a transaction if one was started
 }
 
 func Open(q string) (_ driver.Conn, err error) {
@@ -39,12 +40,13 @@ func Open(q string) (_ driver.Conn, err error) {
 	}
 
 	sess := session.New()
-	// @TODO don't hardcode region, but does that mean we need other configs as well?
 
 	c := &Conn{
-		databaseName:   cfg.Get("Database"),
-		resourceARN:    cfg.Get("ResourceARN"),
-		secretARN:      cfg.Get("SecretARN"),
+		databaseName: cfg.Get("Database"),
+		resourceARN:  cfg.Get("ResourceARN"),
+		secretARN:    cfg.Get("SecretARN"),
+
+		// @TODO don't hardcode region, but does that mean user need to be able to pass other configs as well?
 		rdsDataService: rdsds.New(sess, aws.NewConfig().WithRegion("eu-west-1")),
 	}
 
@@ -59,7 +61,7 @@ func Open(q string) (_ driver.Conn, err error) {
 // context is for the preparation of the statement,
 // it must not store the context within the statement itself.
 func (c *Conn) PrepareContext(ctx context.Context, query string) (_ driver.Stmt, err error) {
-	return &Stmt{query: query, conn: c}, nil
+	panic("not implemented")
 }
 
 // BeginTx starts and returns a new transaction.
@@ -79,7 +81,61 @@ func (c *Conn) BeginTx(ctx context.Context, opts sql.TxOptions) (_ driver.Tx, er
 		return nil, fmt.Errorf("connection already closed") //@TODO test
 	}
 
-	panic("not implemented, yet")
+	if c.transactionID != "" {
+		return nil, fmt.Errorf("a transaction already started") //@TODO test
+	}
+
+	var out *rdsds.BeginTransactionOutput
+	if out, err = c.rdsDataService.BeginTransactionWithContext(ctx, &rdsds.BeginTransactionInput{
+		// Schema: @TODO add schema support
+		Database:    aws.String(c.databaseName),
+		ResourceArn: aws.String(c.resourceARN),
+		SecretArn:   aws.String(c.secretARN),
+	}); err != nil {
+		return nil, fmt.Errorf("failed to being transaction: %w", err)
+	}
+
+	c.transactionID = aws.StringValue(out.TransactionId)
+	return c, nil
+}
+
+func (c *Conn) Commit() (err error) {
+	if c.transactionID == "" {
+		return fmt.Errorf("no open transaction to commit") //@TODO test
+	}
+
+	// @TODO do we want to allow the user the option to configure a timeout?
+	ctx := context.Background()
+
+	if _, err = c.rdsDataService.CommitTransactionWithContext(ctx, &rdsds.CommitTransactionInput{
+		TransactionId: aws.String(c.transactionID),
+		ResourceArn:   aws.String(c.resourceARN),
+		SecretArn:     aws.String(c.secretARN),
+	}); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	c.transactionID = ""
+	return
+}
+
+func (c *Conn) Rollback() (err error) {
+	if c.transactionID == "" {
+		return fmt.Errorf("no open transaction to rollback") //@TODO test
+	}
+
+	// @TODO do we want to allow the user the option to configure a timeout here?
+	ctx := context.Background()
+
+	if _, err = c.rdsDataService.RollbackTransactionWithContext(ctx, &rdsds.RollbackTransactionInput{
+		TransactionId: aws.String(c.transactionID),
+		ResourceArn:   aws.String(c.resourceARN),
+		SecretArn:     aws.String(c.secretARN),
+	}); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	c.transactionID = ""
 	return
 }
 
@@ -140,16 +196,23 @@ func (c *Conn) execute(ctx context.Context, query string, args []driver.NamedVal
 		}
 	}
 
-	if out, err = c.rdsDataService.ExecuteStatementWithContext(ctx, &rdsds.ExecuteStatementInput{
+	in := &rdsds.ExecuteStatementInput{
+		// ResultSetOptions @TODO allow the user to configure this
+		// Schema @TODO allow the user to pass a schema this
 		// ContinueAfterTimeout:  aws.Bool(false), @TODO allow this to be configurable
-
 		IncludeResultMetadata: aws.Bool(true), //must be set to true for row iteration
 		Parameters:            params,
 		Database:              aws.String(c.databaseName),
 		ResourceArn:           aws.String(c.resourceARN),
 		SecretArn:             aws.String(c.secretARN),
 		Sql:                   aws.String(query),
-	}); err != nil {
+	}
+
+	if c.transactionID != "" {
+		in.SetTransactionId(c.transactionID)
+	}
+
+	if out, err = c.rdsDataService.ExecuteStatementWithContext(ctx, in); err != nil {
 		return nil, fmt.Errorf("failed to execute statement: %w", err)
 	}
 
@@ -160,82 +223,12 @@ func (c *Conn) execute(ctx context.Context, query string, args []driver.NamedVal
 //
 // Deprecated: Drivers should implement ConnBeginTx instead (or additionally).
 func (c *Conn) Begin() (driver.Tx, error) {
-	panic("not implemented, use BeginTx instead")
+	return c.BeginTx(context.Background(), sql.TxOptions{})
 }
 
 // Prepare returns a prepared statement, bound to this connection.
 func (c *Conn) Prepare(query string) (driver.Stmt, error) {
-	panic("not implemented, use PrepareContext instead")
-}
-
-// Stmt is a prepared statement. It is bound to a Conn and not used by multiple goroutines concurrently.
-type Stmt struct {
-	conn   *Conn
-	query  string
-	closed bool
-}
-
-// Close closes the statement.
-//
-// As of Go 1.1, a Stmt will not be closed if it's in use
-// by any queries.
-func (s *Stmt) Close() (err error) { s.closed = true; return }
-
-// NumInput returns the number of placeholder parameters.
-//
-// If NumInput returns >= 0, the sql package will sanity check
-// argument counts from callers and return errors to the caller
-// before the statement's Exec or Query methods are called.
-//
-// NumInput may also return -1, if the driver doesn't know
-// its number of placeholders. In that case, the sql package
-// will not sanity check Exec or Query argument counts.
-func (s *Stmt) NumInput() int {
-
-	// @TODO This is a limitation of this driver. The AWS API doesn't provide
-	// us with an function that parses and returns the correct value. Creating
-	// one ourselves is risky as this is security critical logic.
-	return -1
-}
-
-// QueryContext executes a query that may return rows, such as a
-// SELECT.
-//
-// QueryContext must honor the context timeout and return when it is canceled.
-func (s *Stmt) QueryContext(ctx context.Context, args []driver.NamedValue) (_ driver.Rows, err error) {
-	if s.closed {
-		return nil, fmt.Errorf("statement already closed") //@TODO test
-	}
-
-	return s.conn.QueryContext(ctx, s.query, args)
-}
-
-// ExecContext executes a query that doesn't return rows, such
-// as an INSERT or UPDATE.
-//
-// ExecContext must honor the context timeout and return when it is canceled.
-func (s *Stmt) ExecContext(ctx context.Context, args []driver.NamedValue) (_ driver.Result, err error) {
-	if s.closed {
-		return nil, fmt.Errorf("statement already closed") //@TODO test
-	}
-
-	return s.conn.ExecContext(ctx, s.query, args)
-}
-
-// Exec executes a query that doesn't return rows, such
-// as an INSERT or UPDATE.
-//
-// Deprecated: Drivers should implement StmtExecContext instead (or additionally).
-func (s *Stmt) Exec(args []driver.Value) (driver.Result, error) {
-	panic("not implemented, use ExecContext instead")
-}
-
-// Query executes a query that may return rows, such as a
-// SELECT.
-//
-// Deprecated: Drivers should implement StmtQueryContext instead (or additionally).
-func (s *Stmt) Query(args []driver.Value) (driver.Rows, error) {
-	panic("not implemented, use QueryContext instead")
+	return c.PrepareContext(context.Background(), query)
 }
 
 // Rows is an iterator over an executed query's results.
